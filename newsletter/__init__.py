@@ -1,0 +1,1 @@
+# Newsletter agent package.

@@ -1,10 +1,10 @@
 """
 Tool implementations for the Newsletter Agent.
 
-Each tool is a plain Python function that the Azure AI Foundry Agent
+Each tool is a plain Python function that the Azure OpenAI Agent
 calls via Function Calling.  The functions talk to external APIs
-(Azure DevOps via ado_client, Microsoft Graph) and return data the LLM
-uses to compose the newsletter.
+(Azure DevOps via shared.ado_client, Microsoft Graph) and return data
+the LLM uses to compose the newsletter.
 """
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ import re
 import requests
 from datetime import datetime, timedelta, timezone
 
-import config
-import ado_client
+from newsletter import config
+from shared import ado_client
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -25,7 +25,7 @@ import ado_client
 
 def _graph_access_token() -> str:
     """Get a Graph token via client credentials (app-only, no user login)."""
-    import graph_auth
+    from shared import graph_auth
     return graph_auth.get_graph_token()
 
 
@@ -60,7 +60,6 @@ def get_hot_topics_files() -> str:
         try:
             if fpath.suffix.lower() in _TEXT_EXTENSIONS:
                 content = fpath.read_text(encoding="utf-8", errors="replace")
-                # Truncate very large files to avoid token overload
                 if len(content) > 4000:
                     content = content[:4000] + "\n... [truncated]"
             else:
@@ -73,7 +72,7 @@ def get_hot_topics_files() -> str:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 2. ADO Wiki Commits – TSG (uses ado_client)
+# 2. ADO Wiki Commits – TSG (uses shared.ado_client)
 # ════════════════════════════════════════════════════════════════════
 
 def get_wiki_commits(
@@ -82,14 +81,7 @@ def get_wiki_commits(
 ) -> str:
     """
     Fetch wiki commits from the Fabric code wiki, scoped to a specific
-    wiki folder (e.g. '/Fabric Experiences/Power BI').
-
-    Uses the proven two-step approach:
-    1. Fetch commits scoped to the wiki's mappedPath (/Trident)
-    2. For each commit, fetch file changes and filter to the folder
-
-    Returns JSON array of: date, author, message, filename, wiki_path,
-    category (NEW/EDIT/DELETE/RENAME), wiki_link, commit_link.
+    wiki folder.
     """
     folder_filter = folder_filter or config.TSG_WIKI_FOLDER
     org = config.ADO_ORG
@@ -102,47 +94,32 @@ def get_wiki_commits(
     end_date = now.strftime("%Y-%m-%dT23:59:59Z")
 
     rows = ado_client.fetch_wiki_commits_for_folder(
-        org=org,
-        project=project,
-        repo=repo,
-        pat=pat,
-        start_date=start_date,
-        end_date=end_date,
-        wiki_name=config.TSG_WIKI_NAME,
-        folder_filter=folder_filter,
+        org=org, project=project, repo=repo, pat=pat,
+        start_date=start_date, end_date=end_date,
+        wiki_name=config.TSG_WIKI_NAME, folder_filter=folder_filter,
     )
 
-    # Keep only NEW, EDIT, and RENAME changes (skip DELETE)
     rows = [r for r in rows if r.get("category") in ("NEW", "EDIT", "RENAME")]
 
-    # Deduplicate by wiki_link — keep only one entry per page, preferring
-    # NEW > RENAME > EDIT as the category shown.
     category_priority = {"NEW": 0, "RENAME": 1, "EDIT": 2}
-    seen: dict[str, dict] = {}  # wiki_link -> slim row
-
-    # The base folder (e.g. '/Fabric Experiences/Power BI') has 2 segments
-    # after the leading slash.  The 3rd segment is the component name.
+    seen: dict[str, dict] = {}
     base_depth = len([p for p in (folder_filter or "").strip("/").split("/") if p])
 
     for r in rows:
         link = r.get("wiki_link", "")
         cat = r.get("category", "EDIT")
-        # Derive folder and page from wiki_path (NEW/RENAME) or from wiki_link
         wiki_path = r.get("wiki_path", "")
         if wiki_path:
             parts = wiki_path.rsplit("/", 1)
             folder = parts[0] if len(parts) > 1 else ""
             page = parts[-1]
         else:
-            # For EDIT rows without wiki_path, extract from wiki_link
             decoded = link.split("/wikis/")[-1] if "/wikis/" in link else link
             decoded = decoded.replace("%2F", "/").replace("%3A%3A", "::").replace("-", " ")
             parts = decoded.rsplit("/", 1)
             folder = parts[0] if len(parts) > 1 else ""
             page = parts[-1]
 
-        # Extract component name: the first segment after the base folder
-        # e.g. '/Fabric Experiences/Power BI/DORE/SBL::...' → 'DORE'
         folder_segments = [p for p in folder.strip("/").split("/") if p]
         component = folder_segments[base_depth] if len(folder_segments) > base_depth else ""
 
@@ -151,18 +128,15 @@ def get_wiki_commits(
             entry["_cat"] = cat
             seen[link] = entry
 
-    # Remove internal sort key and sort by component then page
     for v in seen.values():
         v.pop("_cat", None)
     slim_rows = sorted(seen.values(), key=lambda r: (r["component"], r["page"]))
-
-    # Limit to 50 unique pages to avoid token overload
     slim_rows = slim_rows[:50]
     return json.dumps(slim_rows, indent=2)
 
 
 # ════════════════════════════════════════════════════════════════════
-# 3. Fabric Made EEE-z – New Feature wiki pages (uses ado_client)
+# 3. Fabric Made EEE-z – New Feature wiki pages
 # ════════════════════════════════════════════════════════════════════
 
 def get_eeez_features(
@@ -174,8 +148,6 @@ def get_eeez_features(
     List new-feature wiki pages from /New Feature Readiness/{year}/{month}
     in the Fabric wiki, filtered to pages whose title contains the
     given substring (default: 'NF-PBI').
-
-    Returns JSON array of {title, path, wiki_link, content}.
     """
     now = datetime.now(timezone.utc)
     year = year or int(config.EEEZ_YEAR or now.year)
@@ -183,7 +155,6 @@ def get_eeez_features(
     title_filter = title_filter or config.EEEZ_TITLE_FILTER
 
     parent_path = f"/New Feature Readiness/{year}/{month}"
-
     org = config.ADO_ORG
     project = config.ADO_PROJECT
     wiki = config.TSG_WIKI_NAME
@@ -191,23 +162,19 @@ def get_eeez_features(
 
     pages = ado_client.fetch_wiki_child_pages(
         org, project, wiki, pat,
-        parent_path=parent_path,
-        title_filter=title_filter,
+        parent_path=parent_path, title_filter=title_filter,
     )
 
-    # Optionally fetch content for each matching page
     for page in pages:
         content = ado_client.fetch_wiki_page_content(
             org, project, wiki, pat, page["path"]
         )
-        # Truncate long content to keep token usage reasonable
         page["content"] = content[:2000] if len(content) > 2000 else content
 
     return json.dumps(pages, indent=2)
 
 
 def _prev_month_abbr(dt: datetime) -> str:
-    """Return 3-letter abbreviation for the previous month (e.g. 'Feb')."""
     first_of_month = dt.replace(day=1)
     prev = first_of_month - timedelta(days=1)
     return prev.strftime("%b")
@@ -238,8 +205,6 @@ def get_ado_query_results(
 
     items = ado_client.fetch_ado_query_results(org_url, project, pat, query_id)
 
-    # Enrich CSS Feedback items: extract category from title pattern
-    # [CSSFeedback][Category][author] Description
     bracket_re = re.compile(r"^\[CSSFeedback\]\[([^\]]+)\]\[[^\]]+\]\s*[-:]?\s*(.*)$", re.IGNORECASE)
     for item in items:
         title = item.get("title", "")
@@ -256,10 +221,7 @@ def get_ado_query_results(
 # ════════════════════════════════════════════════════════════════════
 
 def get_static_content(section_name: str = "vteam") -> str:
-    """Return content for a newsletter section.
-
-    For 'vteam', reads the markdown file specified by VTEAM_MD_FILE config.
-    """
+    """Return content for a newsletter section."""
     if section_name == "vteam":
         md_path = config.VTEAM_MD_FILE
         try:
@@ -280,20 +242,15 @@ def send_email(
     to_recipients: str | None = None,
 ) -> str:
     """Send an HTML email via Power Automate HTTP webhook."""
-    to_recipients = to_recipients or config.EMAIL_RECIPIENTS
-    webhook_url = config.POWER_AUTOMATE_WEBHOOK_URL
+    from shared.email import send_email as _send
 
-    if not webhook_url:
-        return "POWER_AUTOMATE_WEBHOOK_URL not set – email not sent."
-
-    payload = {
-        "subject": subject,
-        "html_body": html_body,
-        "to_recipients": to_recipients,
-    }
-    resp = requests.post(webhook_url, json=payload, timeout=120)
-    resp.raise_for_status()
-    return f"Email sent successfully to {to_recipients}"
+    to = to_recipients or config.EMAIL_RECIPIENTS
+    return _send(
+        subject=subject,
+        html_body=html_body,
+        to_recipients=to,
+        webhook_url=config.POWER_AUTOMATE_WEBHOOK_URL,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════

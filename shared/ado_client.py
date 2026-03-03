@@ -1,6 +1,7 @@
 """
-Azure DevOps client — adapted from proven azure_wiki_commits.py.
-Handles wiki-backed repos, code wiki path mapping, and commit scanning.
+Azure DevOps client — shared across all agents.
+Handles wiki-backed repos, code wiki path mapping, commit scanning,
+and work-item query execution.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from urllib.parse import quote, unquote
 
 import requests
 
-log = logging.getLogger("newsletter.ado")
+log = logging.getLogger("shared.ado")
 
 _DASH_PLACEHOLDER = "\x00"
 
@@ -45,13 +46,6 @@ def _categorize(change_type: str) -> str:
 
 
 def _git_path_to_wiki_path(git_path: str, mapped_path: str = "/") -> str:
-    """
-    Convert an ADO code wiki git item path to a wiki page path.
-    - dashes '-' in git names → spaces in wiki page names
-    - '%2D' in git names → literal dash '-'
-    - mappedPath prefix stripped
-    - .md extension removed
-    """
     path = git_path
     if path.endswith(".md"):
         path = path[:-3]
@@ -94,7 +88,6 @@ def fetch_wiki_page(
     org: str, project: str, wiki: str, pat: str,
     path: str, recursion: str = "oneLevel", include_content: bool = False,
 ) -> dict | None:
-    """Fetch a wiki page by path, optionally with children and content."""
     p = quote(project, safe="")
     w = quote(wiki, safe="")
     encoded_path = quote(path, safe="/")
@@ -117,11 +110,6 @@ def fetch_wiki_child_pages(
     org: str, project: str, wiki: str, pat: str,
     parent_path: str, title_filter: str = "",
 ) -> list[dict]:
-    """
-    List child pages under a wiki path.  Optionally filter by a
-    case-insensitive substring in the page title (e.g. 'NF-PBI').
-    Returns list of {title, path, wiki_link}.
-    """
     page = fetch_wiki_page(org, project, wiki, pat, parent_path, recursion="oneLevel")
     if page is None:
         return []
@@ -130,34 +118,22 @@ def fetch_wiki_child_pages(
     results = []
     for child in children:
         child_path = child.get("path", "")
-        title = child_path.rsplit("/", 1)[-1]  # last segment = page title
-
-        # Skip .attachments folder
+        title = child_path.rsplit("/", 1)[-1]
         if title.startswith("."):
             continue
-
         if title_filter and title_filter.lower() not in title.lower():
             continue
-
         wiki_encoded = child_path.replace("/", "%2F")
         link = f"https://{org}.visualstudio.com/{project}/_wiki/wikis/{wiki}{wiki_encoded}"
-        results.append({
-            "title": title,
-            "path": child_path,
-            "wiki_link": link,
-        })
+        results.append({"title": title, "path": child_path, "wiki_link": link})
 
-    log.info(
-        "Listed %d child pages under %s (filter=%s)",
-        len(results), parent_path, title_filter,
-    )
+    log.info("Listed %d child pages under %s (filter=%s)", len(results), parent_path, title_filter)
     return results
 
 
 def fetch_wiki_page_content(
     org: str, project: str, wiki: str, pat: str, path: str,
 ) -> str:
-    """Fetch the markdown content of a single wiki page."""
     page = fetch_wiki_page(org, project, wiki, pat, path, include_content=True)
     if page is None:
         return ""
@@ -168,7 +144,6 @@ def fetch_commits(
     org: str, project: str, repo: str, pat: str,
     start_date: str, end_date: str, item_path: str = "",
 ) -> list[dict]:
-    """Return raw commit list from ADO Git API (handles pagination)."""
     p = quote(project, safe="")
     r = quote(repo, safe="")
     base_url = (
@@ -202,7 +177,6 @@ def fetch_commits(
 def fetch_commit_changes(
     org: str, project: str, repo: str, pat: str, commit_id: str,
 ) -> list[dict]:
-    """Return list of file changes for a single commit."""
     p = quote(project, safe="")
     r = quote(repo, safe="")
     url = (
@@ -216,54 +190,28 @@ def fetch_commit_changes(
 
 
 def fetch_wiki_commits_for_folder(
-    org: str,
-    project: str,
-    repo: str,
-    pat: str,
-    start_date: str,
-    end_date: str,
-    wiki_name: str = "",
-    folder_filter: str = "",
+    org: str, project: str, repo: str, pat: str,
+    start_date: str, end_date: str,
+    wiki_name: str = "", folder_filter: str = "",
 ) -> list[dict]:
-    """
-    Fetch wiki commits and return processed rows filtered to a specific
-    wiki folder (e.g. '/Fabric Experiences/Power BI').
-
-    Returns a list of dicts with: date, author, message, filename,
-    wiki_path, category (NEW/EDIT/DELETE), wiki_link, commit_link.
-    """
-    # Resolve wiki metadata
     wikis = fetch_wikis(org, project, pat)
-    effective_wiki, mapped_path, wiki_type = match_wiki_for_repo(
-        wikis, wiki_name or repo
-    )
-    log.info(
-        "Wiki resolved: name=%s type=%s mappedPath=%s",
-        effective_wiki, wiki_type, mapped_path,
-    )
+    effective_wiki, mapped_path, wiki_type = match_wiki_for_repo(wikis, wiki_name or repo)
+    log.info("Wiki resolved: name=%s type=%s mappedPath=%s", effective_wiki, wiki_type, mapped_path)
 
-    # For code wikis, scope commit query to mapped path
     item_path = ""
     if wiki_type == "codeWiki" and mapped_path and mapped_path != "/":
         item_path = mapped_path.rstrip("/")
 
-    commits = fetch_commits(
-        org, project, repo, pat, start_date, end_date, item_path=item_path
-    )
+    commits = fetch_commits(org, project, repo, pat, start_date, end_date, item_path=item_path)
     log.info("Fetched %d commits", len(commits))
 
-    # Build the git-path prefix for folder filtering
-    # e.g. folder_filter="/Fabric Experiences/Power BI"
-    # becomes git prefix: /Trident/Fabric-Experiences/Power-BI
     git_folder_prefix = ""
     if folder_filter and mapped_path:
-        # Convert wiki folder path to git path convention (spaces→dashes)
         git_folder = folder_filter.replace(" ", "-")
         mp = mapped_path.rstrip("/")
         git_folder_prefix = f"{mp}{git_folder}".lower()
         log.info("Git folder prefix filter: %s", git_folder_prefix)
 
-    # Process each commit's changes in parallel
     rows: list[dict] = []
 
     def _process_commit(commit):
@@ -278,32 +226,19 @@ def fetch_wiki_commits_for_folder(
             file_path = item.get("path", "")
             if not file_path.endswith(".md"):
                 continue
-
-            # Apply folder filter
-            if git_folder_prefix:
-                if not file_path.lower().startswith(git_folder_prefix):
-                    continue
-
+            if git_folder_prefix and not file_path.lower().startswith(git_folder_prefix):
+                continue
             change_type = change.get("changeType", "edit")
             category = _categorize(change_type)
             wiki_path = _git_path_to_wiki_path(file_path, mapped_path)
-            wiki_link = _wiki_link(org, project, effective_wiki, file_path)
-
+            wiki_link_url = _wiki_link(org, project, effective_wiki, file_path)
             result.append({
-                "date": date[:10],
-                "author": author,
-                "message": message,
-                "filename": wiki_path.split("/")[-1],
-                "wiki_path": wiki_path,
-                "full_git_path": file_path,
-                "category": category,
-                "change_type": change_type,
-                "wiki_link": wiki_link,
+                "date": date[:10], "author": author, "message": message,
+                "filename": wiki_path.split("/")[-1], "wiki_path": wiki_path,
+                "full_git_path": file_path, "category": category,
+                "change_type": change_type, "wiki_link": wiki_link_url,
                 "commit_id": commit_id[:8],
-                "commit_link": (
-                    f"https://dev.azure.com/{org}/{project}"
-                    f"/_git/{repo}/commit/{commit_id}"
-                ),
+                "commit_link": f"https://dev.azure.com/{org}/{project}/_git/{repo}/commit/{commit_id}",
             })
         return result
 
@@ -315,7 +250,6 @@ def fetch_wiki_commits_for_folder(
             except Exception as e:
                 log.warning("Commit processing error: %s", e)
 
-    # Sort by date descending
     rows.sort(key=lambda r: r["date"], reverse=True)
     log.info("Processed %d wiki changes (folder_filter=%s)", len(rows), folder_filter)
     return rows
@@ -324,7 +258,6 @@ def fetch_wiki_commits_for_folder(
 def fetch_ado_query_results(
     org_url: str, project: str, pat: str, query_id: str,
 ) -> list[dict]:
-    """Execute a saved ADO work-item query and return results."""
     p = quote(project, safe="")
     url = f"{org_url}/{p}/_apis/wit/wiql/{query_id}?api-version=7.1"
     resp = requests.get(url, auth=_auth(pat), timeout=60)
@@ -358,12 +291,8 @@ def fetch_ado_query_results(
                 "id": fields.get("System.Id"),
                 "title": fields.get("System.Title"),
                 "state": fields.get("System.State"),
-                "assignedTo": (
-                    fields.get("System.AssignedTo", {}).get("displayName", "")
-                ),
+                "assignedTo": fields.get("System.AssignedTo", {}).get("displayName", ""),
                 "type": fields.get("System.WorkItemType"),
-                "completedWork": fields.get(
-                    "Microsoft.VSTS.Scheduling.CompletedWork", 0
-                ),
+                "completedWork": fields.get("Microsoft.VSTS.Scheduling.CompletedWork", 0),
             })
     return items

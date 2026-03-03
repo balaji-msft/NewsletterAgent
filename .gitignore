@@ -1,19 +1,27 @@
+# ── Python ──────────────────────────────────────────────────────────
 __pycache__/
-.venv/
-local.settings.json
-.graph_token_cache.json
-.python_packages/
 *.pyc
-logs/
-newsletter_output.html
+*.pyo
+.venv/
+.python_packages/
 
-# Certificates
+# ── Secrets & credentials (NEVER commit) ────────────────────────────
+local.settings.json
+.env
+.env.*
 *.pfx
 *.cer
 *.pem
+*.key
+.graph_token_cache.json
 
-# Deprecated / cleanup
-graph_auth.py
-setup_certificate.ps1
-old*.html
-test_*.py
+# ── Generated output ────────────────────────────────────────────────
+output/
+logs/
+
+# ── IDE / OS ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store

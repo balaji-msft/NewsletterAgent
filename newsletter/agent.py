@@ -8,19 +8,17 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
-from openai import AzureOpenAI
 
-import config
-import tools
+from newsletter import config
+from newsletter import tools
+from shared.openai_client import create_openai_client
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("newsletter.agent")
 
 # ── Tool definitions (JSON schemas for the LLM) ────────────────────
 
@@ -152,7 +150,7 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "send_email",
             "description": (
-                "Send the compiled HTML newsletter via email using Microsoft Graph API."
+                "Send the compiled HTML newsletter via email using Power Automate webhook."
             ),
             "parameters": {
                 "type": "object",
@@ -190,7 +188,6 @@ def _load_prompt_yaml() -> dict:
     with open(_PROMPT_YAML, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
-    # Map of placeholder → runtime value
     replacements = {
         "current_month": CURRENT_MONTH,
         "tsg_wiki_folder": config.TSG_WIKI_FOLDER,
@@ -212,50 +209,26 @@ def _load_prompt_yaml() -> dict:
 
 
 def get_system_prompt() -> str:
-    """Return the rendered system prompt from prompt.yaml."""
     return _load_prompt_yaml()["system_prompt"]
 
 
 def get_default_user_prompt() -> str:
-    """Return the rendered default user prompt from prompt.yaml."""
     return _load_prompt_yaml()["default_user_prompt"]
 
 
 SYSTEM_PROMPT = get_system_prompt()
 
-
 # ── Agent creation & execution ──────────────────────────────────────
 
-MAX_TOOL_ROUNDS = 15  # safety limit on tool-call loops
-
-
-def create_openai_client() -> AzureOpenAI:
-    """Create an AzureOpenAI client with Entra ID (DefaultAzureCredential)."""
-    token_provider = get_bearer_token_provider(
-        DefaultAzureCredential(),
-        "https://cognitiveservices.azure.com/.default",
-    )
-    client = AzureOpenAI(
-        azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-        azure_ad_token_provider=token_provider,
-        api_version=config.AZURE_OPENAI_API_VERSION,
-    )
-    logger.info(
-        "Azure OpenAI client ready  endpoint=%s  model=%s",
-        config.AZURE_OPENAI_ENDPOINT,
-        config.MODEL_DEPLOYMENT,
-    )
-    return client
+MAX_TOOL_ROUNDS = 15
 
 
 def _dispatch_tool_call(tool_name: str, arguments: dict) -> str:
-    """Route a tool call from the agent to the actual Python function."""
     func = tools.TOOL_FUNCTIONS.get(tool_name)
     if func is None:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
     try:
-        result = func(**arguments)
-        return result
+        return func(**arguments)
     except Exception as e:
         logger.exception("Tool %s failed", tool_name)
         return json.dumps({"error": str(e)})
@@ -264,13 +237,13 @@ def _dispatch_tool_call(tool_name: str, arguments: dict) -> str:
 def _create_log_dir() -> Path:
     """Create a timestamped logs directory for this run."""
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path(__file__).with_name("logs") / ts
+    # Logs go to <project_root>/logs/
+    log_dir = Path(__file__).resolve().parent.parent / "logs" / ts
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
 
 def _safe_filename(name: str) -> str:
-    """Convert a tool name to a safe filename."""
     return re.sub(r'[^a-zA-Z0-9_\-]', '_', name)
 
 
@@ -278,27 +251,25 @@ def run_newsletter_agent(user_prompt: str | None = None) -> str:
     """
     Use Azure OpenAI chat completions with function calling to compile
     the newsletter.
-
-    Args:
-        user_prompt: Custom prompt. If None, uses the default newsletter prompt.
     """
-    client = create_openai_client()
+    client = create_openai_client(
+        endpoint=config.AZURE_OPENAI_ENDPOINT,
+        api_version=config.AZURE_OPENAI_API_VERSION,
+        deployment=config.MODEL_DEPLOYMENT,
+    )
     log_dir = _create_log_dir()
     tool_call_counter = 0
-    captured_html: str | None = None        # grab html_body from send_email calls
+    captured_html: str | None = None
     logger.info("Tool output logs: %s", log_dir)
 
-    # Build the tools list (OpenAI function-calling format)
     oai_tools = [
         {"type": "function", "function": td["function"]}
         for td in TOOL_DEFINITIONS
     ]
 
-    # Default prompt
     if not user_prompt:
         user_prompt = get_default_user_prompt()
 
-    # Conversation history
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -314,9 +285,7 @@ def run_newsletter_agent(user_prompt: str | None = None) -> str:
         )
         choice = response.choices[0]
 
-        # If the model wants to call tools
         if choice.finish_reason == "tool_calls" or choice.message.tool_calls:
-            # Add the assistant message as a dict (avoid pydantic serialization issues)
             assistant_msg = {
                 "role": "assistant",
                 "content": choice.message.content,
@@ -338,13 +307,11 @@ def run_newsletter_agent(user_prompt: str | None = None) -> str:
                 args = json.loads(tc.function.arguments)
                 logger.info("Tool call: %s(%s)", tc.function.name, args)
 
-                # Capture the HTML before dispatching (send_email may fail)
                 if tc.function.name == "send_email" and "html_body" in args:
                     captured_html = args["html_body"]
 
                 output = _dispatch_tool_call(tc.function.name, args)
 
-                # ── Log tool output to file ──
                 tool_call_counter += 1
                 fname = f"{tool_call_counter:02d}_{_safe_filename(tc.function.name)}.json"
                 log_file = log_dir / fname
@@ -369,13 +336,10 @@ def run_newsletter_agent(user_prompt: str | None = None) -> str:
                     "tool_call_id": tc.id,
                     "content": output,
                 })
-            # Loop back for the next completion
             continue
 
-        # Model finished – return the text response
         final_text = choice.message.content or ""
         logger.info("Agent finished after %d rounds.", round_num + 1)
-        # Prefer the captured HTML (from send_email) over the chat text
         if captured_html:
             logger.info("Returning captured HTML from send_email (%d chars).", len(captured_html))
             return captured_html

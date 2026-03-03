@@ -1,18 +1,21 @@
 """
-Standalone entry point – run the newsletter agent locally.
+Unified entry point – run any agent locally.
 
 Usage:
-  python run_local.py                            # full newsletter (all sections)
-  python run_local.py --section tsg              # only the TSG section
-  python run_local.py --section hot_topics       # only Hot Topics
-  python run_local.py --section eeez             # only Fabric Made EEE-z
-  python run_local.py --section css_feedback     # only CSS Feedback Items
-  python run_local.py --section css_taxonomy     # only CSS Taxonomy Changes
-  python run_local.py --section vteam            # only Component V-Team
-  python run_local.py "your custom prompt"       # use a custom prompt
-  python run_local.py --interactive              # interactive mode (type prompts)
-  python run_local.py --send                     # generate & send email
-  python run_local.py --section tsg --send       # single section + send email
+  python run_local.py                                # full newsletter (all sections)
+  python run_local.py --agent newsletter             # explicit: newsletter agent
+  python run_local.py --agent mor                    # Fabric BI MoR callout agent
+  python run_local.py --section tsg                  # only the TSG section
+  python run_local.py --section hot_topics           # only Hot Topics
+  python run_local.py --section eeez                 # only Fabric Made EEE-z
+  python run_local.py --section css_feedback         # only CSS Feedback Items
+  python run_local.py --section css_taxonomy         # only CSS Taxonomy Changes
+  python run_local.py --section vteam                # only Component V-Team
+  python run_local.py "your custom prompt"           # use a custom prompt
+  python run_local.py --interactive                  # interactive mode (type prompts)
+  python run_local.py --send                         # generate & send email
+  python run_local.py --section tsg --send           # single section + send email
+  python run_local.py --agent mor --send             # MoR callouts + send email
 """
 import argparse
 import json
@@ -20,7 +23,7 @@ import logging
 import os
 import sys
 
-# Load settings from local.settings.json into env vars
+# ── Load local.settings.json into env vars ──────────────────────────
 settings_path = os.path.join(os.path.dirname(__file__), "local.settings.json")
 if os.path.exists(settings_path):
     with open(settings_path, "r") as f:
@@ -29,14 +32,12 @@ if os.path.exists(settings_path):
         if v:
             os.environ.setdefault(k, v)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s  %(message)s",
+)
 
-from agent import run_newsletter_agent
-
-# ── Section-specific prompts ────────────────────────────────────────
-# Each key maps to a user prompt that asks the agent to compile ONLY
-# that section. The system prompt stays the same so all tool
-# definitions remain available.
+# ── Section-specific prompts (newsletter only) ──────────────────────
 SECTION_PROMPTS = {
     "hot_topics": (
         "Please compile ONLY the **Hot Topics** section of the newsletter. "
@@ -77,16 +78,131 @@ SECTION_PROMPTS = {
 VALID_SECTIONS = list(SECTION_PROMPTS.keys())
 
 
+# ── Runner helpers ──────────────────────────────────────────────────
+
+def _run_newsletter(args):
+    from newsletter.agent import run_newsletter_agent
+
+    if args.interactive:
+        _interactive_loop("NEWSLETTER AGENT", run_newsletter_agent)
+        return
+
+    if args.section:
+        prompt = SECTION_PROMPTS[args.section]
+        print(f"Running section: {args.section}\n")
+    elif args.prompt:
+        prompt = " ".join(args.prompt)
+        print(f"Custom prompt: {prompt}\n")
+    else:
+        prompt = None
+        print("Using default newsletter prompt.\n")
+
+    result = run_newsletter_agent(user_prompt=prompt)
+    _show_result("NEWSLETTER AGENT RESULT", result)
+
+    suffix = f"_{args.section}" if args.section else ""
+    out_path = os.path.join(os.path.dirname(__file__), "output", f"newsletter_output{suffix}.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+    print(f"\nSaved to: {out_path}")
+
+    if args.send:
+        from newsletter import config as nl_cfg
+        from newsletter.tools import send_email
+
+        section_label = args.section or "Full Newsletter"
+        subject = f"{nl_cfg.EMAIL_SUBJECT_PREFIX} - {section_label}"
+        _send(send_email, subject, result, nl_cfg.EMAIL_RECIPIENTS)
+
+
+def _run_mor(args):
+    from fabricbimor.agent import run_mor_agent
+
+    if args.interactive:
+        _interactive_loop("FABRIC BI MoR CALLOUT AGENT", run_mor_agent)
+        return
+
+    if args.prompt:
+        prompt = " ".join(args.prompt)
+        print(f"Custom prompt: {prompt}\n")
+    else:
+        prompt = None
+        print("Using default MoR callout prompt.\n")
+
+    result = run_mor_agent(user_prompt=prompt)
+    _show_result("MoR CALLOUT AGENT RESULT", result)
+
+    out_path = os.path.join(os.path.dirname(__file__), "output", "fabricbimor_output.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+    print(f"\nSaved to: {out_path}")
+
+    if args.send:
+        from fabricbimor import config as mor_cfg
+        from fabricbimor.tools import send_email
+
+        subject = mor_cfg.EMAIL_SUBJECT_PREFIX
+        _send(send_email, subject, result, mor_cfg.EMAIL_RECIPIENTS)
+
+
+def _interactive_loop(banner: str, run_fn):
+    print("=" * 60)
+    print(f"{banner} - INTERACTIVE MODE")
+    print("Type your prompt, or 'quit' to exit.")
+    print("=" * 60)
+    while True:
+        try:
+            prompt = input("\nYour prompt> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye!")
+            break
+        if not prompt or prompt.lower() in ("quit", "exit", "q"):
+            print("Bye!")
+            break
+        print("\nRunning agent...\n")
+        result = run_fn(user_prompt=prompt)
+        _show_result("AGENT RESPONSE", result)
+
+
+def _show_result(header: str, result: str):
+    print("=" * 60)
+    print(header)
+    print("=" * 60)
+    print(result)
+
+
+def _send(send_fn, subject, html, recipients):
+    print(f"\nSending email to {recipients}...")
+    try:
+        res = send_fn(subject=subject, html_body=html, to_recipients=recipients)
+        print(f"Email sent: {res}")
+    except Exception as exc:
+        print(f"Email send failed: {exc}")
+
+
+# ── Main ────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the Newsletter Agent locally.",
+        description="Run Newsletter or MoR agent locally.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Sections: " + ", ".join(VALID_SECTIONS),
+        epilog=(
+            "Agents: newsletter (default), mor\n"
+            "Newsletter sections: " + ", ".join(VALID_SECTIONS)
+        ),
+    )
+    parser.add_argument(
+        "--agent", "-a",
+        choices=["newsletter", "mor"],
+        default="newsletter",
+        help="Which agent to run (default: newsletter).",
     )
     parser.add_argument(
         "--section", "-s",
         choices=VALID_SECTIONS,
-        help="Compile only a single section (useful for testing).",
+        help="Newsletter only: compile a single section.",
     )
     parser.add_argument(
         "--interactive", "-i",
@@ -96,7 +212,7 @@ def main():
     parser.add_argument(
         "--send",
         action="store_true",
-        help="Send the generated newsletter via email after generation.",
+        help="Send the generated output via email after generation.",
     )
     parser.add_argument(
         "prompt",
@@ -105,65 +221,10 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.interactive:
-        print("=" * 60)
-        print("NEWSLETTER AGENT - INTERACTIVE MODE")
-        print("Type your prompt, or 'quit' to exit.")
-        print("=" * 60)
-        while True:
-            try:
-                prompt = input("\nYour prompt> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nBye!")
-                break
-            if not prompt or prompt.lower() in ("quit", "exit", "q"):
-                print("Bye!")
-                break
-            print("\nRunning agent...\n")
-            result = run_newsletter_agent(user_prompt=prompt)
-            print("=" * 60)
-            print("AGENT RESPONSE")
-            print("=" * 60)
-            print(result)
+    if args.agent == "mor":
+        _run_mor(args)
     else:
-        # Determine the prompt
-        if args.section:
-            prompt = SECTION_PROMPTS[args.section]
-            print(f"Running section: {args.section}\n")
-        elif args.prompt:
-            prompt = " ".join(args.prompt)
-            print(f"Custom prompt: {prompt}\n")
-        else:
-            prompt = None
-            print("Using default newsletter prompt.\n")
-
-        result = run_newsletter_agent(user_prompt=prompt)
-        print("=" * 60)
-        print("NEWSLETTER AGENT RESULT")
-        print("=" * 60)
-        print(result)
-
-        # Save HTML output to file
-        suffix = f"_{args.section}" if args.section else ""
-        out_path = os.path.join(os.path.dirname(__file__), f"newsletter_output{suffix}.html")
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(result)
-        print(f"\nSaved to: {out_path}")
-
-        # Optionally send email
-        if args.send:
-            import config
-            from tools import send_email
-
-            section_label = args.section or "Full Newsletter"
-            subject = f"{config.EMAIL_SUBJECT_PREFIX} - {section_label}"
-            recipients = config.EMAIL_RECIPIENTS
-            print(f"\nSending email to {recipients}...")
-            try:
-                send_result = send_email(subject=subject, html_body=result, to_recipients=recipients)
-                print(f"Email sent: {send_result}")
-            except Exception as exc:
-                print(f"Email send failed: {exc}")
+        _run_newsletter(args)
 
 
 if __name__ == "__main__":

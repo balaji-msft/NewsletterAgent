@@ -2,17 +2,16 @@
 Tool implementations for the Fabric BI MoR Callout Agent.
 
 Fetches work-item data from the ADO query and returns it for the AI agent
-to process into MoR callouts.  Reuses ado_client for the ADO REST calls.
+to process into MoR callouts.  Reuses shared.ado_client for the ADO REST calls.
 """
 from __future__ import annotations
 
 import json
 import logging
 
-import requests
-
-import ado_client
-import fabricbimor_config as cfg
+from shared import ado_client
+from shared.email import send_email as _send_email
+from fabricbimor import config as cfg
 
 log = logging.getLogger("fabricbimor.tools")
 
@@ -49,30 +48,19 @@ def get_mor_query_results() -> str:
     return json.dumps(items, indent=2)
 
 
-# ════════════════════════════════════════════════════════════════════
-# 2. Send Email – Power Automate Webhook
-# ════════════════════════════════════════════════════════════════════
-
 def send_email(
     subject: str,
     html_body: str,
     to_recipients: str | None = None,
 ) -> str:
     """Send an HTML email via Power Automate HTTP webhook."""
-    to_recipients = to_recipients or cfg.EMAIL_RECIPIENTS
-    webhook_url = cfg.POWER_AUTOMATE_WEBHOOK_URL
-
-    if not webhook_url:
-        return "POWER_AUTOMATE_WEBHOOK_URL not set – email not sent."
-
-    payload = {
-        "subject": subject,
-        "html_body": html_body,
-        "to_recipients": to_recipients,
-    }
-    resp = requests.post(webhook_url, json=payload, timeout=120)
-    resp.raise_for_status()
-    return f"Email sent successfully to {to_recipients}"
+    to = to_recipients or cfg.EMAIL_RECIPIENTS
+    return _send_email(
+        subject=subject,
+        html_body=html_body,
+        to_recipients=to,
+        webhook_url=cfg.POWER_AUTOMATE_WEBHOOK_URL,
+    )
 
 
 # ── Tool dispatcher ─────────────────────────────────────────────────

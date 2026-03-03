@@ -74,7 +74,8 @@ EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX", "Monthly Newslette
 POWER_AUTOMATE_WEBHOOK_URL = os.environ.get("POWER_AUTOMATE_WEBHOOK_URL", "")
 
 # ── Static Content ──────────────────────────────────────────────────
+# Path is relative to the project root (one level up from this file)
 VTEAM_MD_FILE = os.environ.get(
     "VTEAM_MD_FILE",
-    os.path.join(os.path.dirname(__file__), "config", "Component_V-Teams_PowerBI_CSS_Supportability.md"),
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "Component_V-Teams_PowerBI_CSS_Supportability.md"),
 )
