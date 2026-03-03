@@ -1,0 +1,19 @@
+- Create a compiling newsletter Agent, I mig
+   - Sections 
+	- Hot topics for month
+            - Get data from SharePoint file and summarize
+        - TSG
+	    - Get TSG commits for month from ADO Repo, with nice table
+        
+        -Fabric made EEE-z
+   
+            - Get new feature TSG commit from ADO Repo
+
+        - CSS Feedback items
+             - Get ADO worktime completed for the month, ADO Query
+           
+        - CSS Taxonomy Changes
+	        -  Get Taxonomy Changes from ADO, ADO query
+
+       - Component V-Team
+           - It is a static data 

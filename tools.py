@@ -1,0 +1,310 @@
+"""
+Tool implementations for the Newsletter Agent.
+
+Each tool is a plain Python function that the Azure AI Foundry Agent
+calls via Function Calling.  The functions talk to external APIs
+(Azure DevOps via ado_client, Microsoft Graph) and return data the LLM
+uses to compose the newsletter.
+"""
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import re
+import requests
+from datetime import datetime, timedelta, timezone
+
+import config
+import ado_client
+
+
+# ════════════════════════════════════════════════════════════════════
+# Helper – Microsoft Graph authentication (client credentials flow)
+# ════════════════════════════════════════════════════════════════════
+
+def _graph_access_token() -> str:
+    """Get a Graph token via client credentials (app-only, no user login)."""
+    import graph_auth
+    return graph_auth.get_graph_token()
+
+
+def _graph_headers() -> dict[str, str]:
+    token = _graph_access_token()
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
+# 1. Hot Topics – Read from local folder
+# ════════════════════════════════════════════════════════════════════
+
+_TEXT_EXTENSIONS = {".md", ".txt", ".html", ".htm", ".csv", ".json", ".xml"}
+
+
+def get_hot_topics_files() -> str:
+    """
+    Read ALL files from the local Hot Topics folder and return their
+    contents as a JSON array of {filename, content}.
+    """
+    folder = pathlib.Path(config.HOT_TOPICS_FOLDER)
+    if not folder.exists():
+        return json.dumps({"error": f"Folder not found: {folder}"})
+
+    file_contents = []
+    for fpath in sorted(folder.iterdir()):
+        if fpath.is_dir():
+            continue
+        try:
+            if fpath.suffix.lower() in _TEXT_EXTENSIONS:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+                # Truncate very large files to avoid token overload
+                if len(content) > 4000:
+                    content = content[:4000] + "\n... [truncated]"
+            else:
+                content = f"[Binary file – {fpath.suffix}, {fpath.stat().st_size} bytes]"
+            file_contents.append({"filename": fpath.name, "content": content})
+        except Exception as e:
+            file_contents.append({"filename": fpath.name, "error": str(e)})
+
+    return json.dumps(file_contents, indent=2)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 2. ADO Wiki Commits – TSG (uses ado_client)
+# ════════════════════════════════════════════════════════════════════
+
+def get_wiki_commits(
+    folder_filter: str | None = None,
+    days_back: int = 30,
+) -> str:
+    """
+    Fetch wiki commits from the Fabric code wiki, scoped to a specific
+    wiki folder (e.g. '/Fabric Experiences/Power BI').
+
+    Uses the proven two-step approach:
+    1. Fetch commits scoped to the wiki's mappedPath (/Trident)
+    2. For each commit, fetch file changes and filter to the folder
+
+    Returns JSON array of: date, author, message, filename, wiki_path,
+    category (NEW/EDIT/DELETE/RENAME), wiki_link, commit_link.
+    """
+    folder_filter = folder_filter or config.TSG_WIKI_FOLDER
+    org = config.ADO_ORG
+    project = config.ADO_PROJECT
+    repo = config.TSG_REPO_NAME
+    pat = config.ADO_PAT
+
+    now = datetime.now(timezone.utc)
+    start_date = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00Z")
+    end_date = now.strftime("%Y-%m-%dT23:59:59Z")
+
+    rows = ado_client.fetch_wiki_commits_for_folder(
+        org=org,
+        project=project,
+        repo=repo,
+        pat=pat,
+        start_date=start_date,
+        end_date=end_date,
+        wiki_name=config.TSG_WIKI_NAME,
+        folder_filter=folder_filter,
+    )
+
+    # Keep only NEW, EDIT, and RENAME changes (skip DELETE)
+    rows = [r for r in rows if r.get("category") in ("NEW", "EDIT", "RENAME")]
+
+    # Deduplicate by wiki_link — keep only one entry per page, preferring
+    # NEW > RENAME > EDIT as the category shown.
+    category_priority = {"NEW": 0, "RENAME": 1, "EDIT": 2}
+    seen: dict[str, dict] = {}  # wiki_link -> slim row
+
+    # The base folder (e.g. '/Fabric Experiences/Power BI') has 2 segments
+    # after the leading slash.  The 3rd segment is the component name.
+    base_depth = len([p for p in (folder_filter or "").strip("/").split("/") if p])
+
+    for r in rows:
+        link = r.get("wiki_link", "")
+        cat = r.get("category", "EDIT")
+        # Derive folder and page from wiki_path (NEW/RENAME) or from wiki_link
+        wiki_path = r.get("wiki_path", "")
+        if wiki_path:
+            parts = wiki_path.rsplit("/", 1)
+            folder = parts[0] if len(parts) > 1 else ""
+            page = parts[-1]
+        else:
+            # For EDIT rows without wiki_path, extract from wiki_link
+            decoded = link.split("/wikis/")[-1] if "/wikis/" in link else link
+            decoded = decoded.replace("%2F", "/").replace("%3A%3A", "::").replace("-", " ")
+            parts = decoded.rsplit("/", 1)
+            folder = parts[0] if len(parts) > 1 else ""
+            page = parts[-1]
+
+        # Extract component name: the first segment after the base folder
+        # e.g. '/Fabric Experiences/Power BI/DORE/SBL::...' → 'DORE'
+        folder_segments = [p for p in folder.strip("/").split("/") if p]
+        component = folder_segments[base_depth] if len(folder_segments) > base_depth else ""
+
+        entry = {"component": component, "page": page, "wiki_link": link}
+        if link not in seen or category_priority.get(cat, 9) < category_priority.get(seen[link].get("_cat", "EDIT"), 9):
+            entry["_cat"] = cat
+            seen[link] = entry
+
+    # Remove internal sort key and sort by component then page
+    for v in seen.values():
+        v.pop("_cat", None)
+    slim_rows = sorted(seen.values(), key=lambda r: (r["component"], r["page"]))
+
+    # Limit to 50 unique pages to avoid token overload
+    slim_rows = slim_rows[:50]
+    return json.dumps(slim_rows, indent=2)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 3. Fabric Made EEE-z – New Feature wiki pages (uses ado_client)
+# ════════════════════════════════════════════════════════════════════
+
+def get_eeez_features(
+    year: int | None = None,
+    month: str | None = None,
+    title_filter: str | None = None,
+) -> str:
+    """
+    List new-feature wiki pages from /New Feature Readiness/{year}/{month}
+    in the Fabric wiki, filtered to pages whose title contains the
+    given substring (default: 'NF-PBI').
+
+    Returns JSON array of {title, path, wiki_link, content}.
+    """
+    now = datetime.now(timezone.utc)
+    year = year or int(config.EEEZ_YEAR or now.year)
+    month = month or config.EEEZ_MONTH or _prev_month_abbr(now)
+    title_filter = title_filter or config.EEEZ_TITLE_FILTER
+
+    parent_path = f"/New Feature Readiness/{year}/{month}"
+
+    org = config.ADO_ORG
+    project = config.ADO_PROJECT
+    wiki = config.TSG_WIKI_NAME
+    pat = config.ADO_PAT
+
+    pages = ado_client.fetch_wiki_child_pages(
+        org, project, wiki, pat,
+        parent_path=parent_path,
+        title_filter=title_filter,
+    )
+
+    # Optionally fetch content for each matching page
+    for page in pages:
+        content = ado_client.fetch_wiki_page_content(
+            org, project, wiki, pat, page["path"]
+        )
+        # Truncate long content to keep token usage reasonable
+        page["content"] = content[:2000] if len(content) > 2000 else content
+
+    return json.dumps(pages, indent=2)
+
+
+def _prev_month_abbr(dt: datetime) -> str:
+    """Return 3-letter abbreviation for the previous month (e.g. 'Feb')."""
+    first_of_month = dt.replace(day=1)
+    prev = first_of_month - timedelta(days=1)
+    return prev.strftime("%b")
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4. ADO Work-Item Queries – CSS Feedback & Taxonomy Changes
+# ════════════════════════════════════════════════════════════════════
+
+def get_ado_query_results(
+    query_id: str,
+    org_url: str | None = None,
+    project: str | None = None,
+) -> str:
+    """
+    Execute a saved ADO work-item query and return results as JSON.
+    Supports querying a different ADO org/project (e.g. CSS Taxonomy).
+    """
+    org_url = org_url or config.ADO_ORG_URL
+    project = project or config.ADO_PROJECT
+
+    if org_url == config.CSS_TAXONOMY_ORG_URL:
+        pat = config.CSS_TAXONOMY_PAT or config.ADO_PAT
+    elif org_url == config.CSS_FEEDBACK_ORG_URL:
+        pat = config.CSS_FEEDBACK_PAT or config.ADO_PAT
+    else:
+        pat = config.ADO_PAT
+
+    items = ado_client.fetch_ado_query_results(org_url, project, pat, query_id)
+
+    # Enrich CSS Feedback items: extract category from title pattern
+    # [CSSFeedback][Category][author] Description
+    bracket_re = re.compile(r"^\[CSSFeedback\]\[([^\]]+)\]\[[^\]]+\]\s*[-:]?\s*(.*)$", re.IGNORECASE)
+    for item in items:
+        title = item.get("title", "")
+        m = bracket_re.match(title)
+        if m:
+            item["feedback_category"] = m.group(1).strip()
+            item["short_title"] = m.group(2).strip()
+
+    return json.dumps(items, indent=2)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 5. Static Content – Component V-Team
+# ════════════════════════════════════════════════════════════════════
+
+def get_static_content(section_name: str = "vteam") -> str:
+    """Return content for a newsletter section.
+
+    For 'vteam', reads the markdown file specified by VTEAM_MD_FILE config.
+    """
+    if section_name == "vteam":
+        md_path = config.VTEAM_MD_FILE
+        try:
+            with open(md_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError:
+            return "<p>V-Team file not found.</p>"
+    return "<p>No content available.</p>"
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6. Send Email – Power Automate Webhook
+# ════════════════════════════════════════════════════════════════════
+
+def send_email(
+    subject: str,
+    html_body: str,
+    to_recipients: str | None = None,
+) -> str:
+    """Send an HTML email via Power Automate HTTP webhook."""
+    to_recipients = to_recipients or config.EMAIL_RECIPIENTS
+    webhook_url = config.POWER_AUTOMATE_WEBHOOK_URL
+
+    if not webhook_url:
+        return "POWER_AUTOMATE_WEBHOOK_URL not set – email not sent."
+
+    payload = {
+        "subject": subject,
+        "html_body": html_body,
+        "to_recipients": to_recipients,
+    }
+    resp = requests.post(webhook_url, json=payload, timeout=120)
+    resp.raise_for_status()
+    return f"Email sent successfully to {to_recipients}"
+
+
+# ════════════════════════════════════════════════════════════════════
+# Tool dispatcher – maps function names to callables
+# ════════════════════════════════════════════════════════════════════
+
+TOOL_FUNCTIONS: dict[str, callable] = {
+    "get_hot_topics_files": get_hot_topics_files,
+    "get_wiki_commits": get_wiki_commits,
+    "get_eeez_features": get_eeez_features,
+    "get_ado_query_results": get_ado_query_results,
+    "get_static_content": get_static_content,
+    "send_email": send_email,
+}

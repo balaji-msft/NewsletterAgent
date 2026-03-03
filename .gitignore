@@ -1,0 +1,19 @@
+__pycache__/
+.venv/
+local.settings.json
+.graph_token_cache.json
+.python_packages/
+*.pyc
+logs/
+newsletter_output.html
+
+# Certificates
+*.pfx
+*.cer
+*.pem
+
+# Deprecated / cleanup
+graph_auth.py
+setup_certificate.ps1
+old*.html
+test_*.py
