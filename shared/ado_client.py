@@ -60,9 +60,9 @@ def _git_path_to_wiki_path(git_path: str, mapped_path: str = "/") -> str:
     return path
 
 
-def _wiki_link(org: str, project: str, wiki: str, file_path: str) -> str:
-    encoded = file_path.replace(".md", "").replace("/", "%2F")
-    return f"https://{org}.visualstudio.com/{project}/_wiki/wikis/{wiki}{encoded}"
+def _wiki_link(org: str, project: str, wiki: str, wiki_path: str) -> str:
+    encoded_path = quote(wiki_path, safe="/")
+    return f"https://{org}.visualstudio.com/{project}/_wiki/wikis/{wiki}?pagePath={encoded_path}"
 
 
 # ── public API ────────────────────────────────────────────────────────
@@ -123,8 +123,7 @@ def fetch_wiki_child_pages(
             continue
         if title_filter and title_filter.lower() not in title.lower():
             continue
-        wiki_encoded = child_path.replace("/", "%2F")
-        link = f"https://{org}.visualstudio.com/{project}/_wiki/wikis/{wiki}{wiki_encoded}"
+        link = _wiki_link(org, project, wiki, child_path)
         results.append({"title": title, "path": child_path, "wiki_link": link})
 
     log.info("Listed %d child pages under %s (filter=%s)", len(results), parent_path, title_filter)
@@ -231,7 +230,7 @@ def fetch_wiki_commits_for_folder(
             change_type = change.get("changeType", "edit")
             category = _categorize(change_type)
             wiki_path = _git_path_to_wiki_path(file_path, mapped_path)
-            wiki_link_url = _wiki_link(org, project, effective_wiki, file_path)
+            wiki_link_url = _wiki_link(org, project, effective_wiki, wiki_path)
             result.append({
                 "date": date[:10], "author": author, "message": message,
                 "filename": wiki_path.split("/")[-1], "wiki_path": wiki_path,

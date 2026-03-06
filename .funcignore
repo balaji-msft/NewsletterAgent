@@ -1,0 +1,44 @@
+# ── Ignore for Azure Functions deployment ───────────────────────────
+# Everything not needed by the Function App timer triggers
+
+# UI & tests
+ui/
+tests/
+*.html
+
+# Output & logs
+output/
+logs/
+
+# Config & docs
+config/
+*.md
+spec.txt
+
+# Dev files
+.venv/
+.vscode/
+.idea/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+
+# Deployment scripts
+deploy.ps1
+setup_certificate.ps1
+Dockerfile
+.dockerignore
+startup.sh
+startup.txt
+
+# Secrets
+local.settings.json
+.env
+.env.*
+*.cer
+.graph_token_cache.json
+
+# Old files
+old*.html

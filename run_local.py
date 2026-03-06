@@ -4,7 +4,10 @@ Unified entry point – run any agent locally.
 Usage:
   python run_local.py                                # full newsletter (all sections)
   python run_local.py --agent newsletter             # explicit: newsletter agent
+  python run_local.py --agent powerbi                # Power BI newsletter agent
+  python run_local.py --agent fabricplatform         # Fabric Platform newsletter agent
   python run_local.py --agent mor                    # Fabric BI MoR callout agent
+  python run_local.py --agent sprint                 # Sprint Summary agent
   python run_local.py --section tsg                  # only the TSG section
   python run_local.py --section hot_topics           # only Hot Topics
   python run_local.py --section eeez                 # only Fabric Made EEE-z
@@ -16,6 +19,9 @@ Usage:
   python run_local.py --send                         # generate & send email
   python run_local.py --section tsg --send           # single section + send email
   python run_local.py --agent mor --send             # MoR callouts + send email
+  python run_local.py --agent sprint --send          # Sprint Summary + send email
+  python run_local.py --agent powerbi --send         # Power BI newsletter + send email
+  python run_local.py --agent fabricplatform --send   # Fabric Platform newsletter + send email
 """
 import argparse
 import json
@@ -46,7 +52,8 @@ SECTION_PROMPTS = {
     ),
     "tsg": (
         "Please compile ONLY the **TSG (Troubleshooting Guides)** section. "
-        "Call get_wiki_commits with the configured folder and days_back=30, "
+        "Call get_wiki_commits with the configured folder and year/month for "
+        "the previous calendar month (e.g. year=2026, month=2 for February), "
         "then render the Component | Page table as an HTML fragment. "
         "Do NOT call any other tools."
     ),
@@ -147,6 +154,109 @@ def _run_mor(args):
         _send(send_email, subject, result, mor_cfg.EMAIL_RECIPIENTS)
 
 
+def _run_sprint(args):
+    from sprintsummary.agent import run_sprint_summary_agent
+
+    if args.interactive:
+        _interactive_loop("SPRINT SUMMARY AGENT", run_sprint_summary_agent)
+        return
+
+    if args.prompt:
+        prompt = " ".join(args.prompt)
+        print(f"Custom prompt: {prompt}\n")
+    else:
+        prompt = None
+        print("Using default Sprint Summary prompt.\n")
+
+    result = run_sprint_summary_agent(user_prompt=prompt)
+    _show_result("SPRINT SUMMARY AGENT RESULT", result)
+
+    out_path = os.path.join(os.path.dirname(__file__), "output", "sprintsummary_output.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+    print(f"\nSaved to: {out_path}")
+
+    if args.send:
+        from sprintsummary import config as sprint_cfg
+        from sprintsummary.tools import send_email
+
+        subject = sprint_cfg.EMAIL_SUBJECT_PREFIX
+        _send(send_email, subject, result, sprint_cfg.EMAIL_RECIPIENTS)
+
+
+def _run_powerbi(args):
+    from powerbi.agent import run_powerbi_newsletter_agent
+
+    if args.interactive:
+        _interactive_loop("POWER BI NEWSLETTER AGENT", run_powerbi_newsletter_agent)
+        return
+
+    if args.section:
+        prompt = SECTION_PROMPTS[args.section]
+        print(f"Running section: {args.section}\n")
+    elif args.prompt:
+        prompt = " ".join(args.prompt)
+        print(f"Custom prompt: {prompt}\n")
+    else:
+        prompt = None
+        print("Using default Power BI newsletter prompt.\n")
+
+    result = run_powerbi_newsletter_agent(user_prompt=prompt)
+    _show_result("POWER BI NEWSLETTER AGENT RESULT", result)
+
+    suffix = f"_{args.section}" if args.section else ""
+    out_path = os.path.join(os.path.dirname(__file__), "output", f"powerbi_output{suffix}.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+    print(f"\nSaved to: {out_path}")
+
+    if args.send:
+        from powerbi import config as pbi_cfg
+        from powerbi.tools import send_email
+
+        section_label = args.section or "Full Newsletter"
+        subject = f"{pbi_cfg.EMAIL_SUBJECT_PREFIX} - {section_label}"
+        _send(send_email, subject, result, pbi_cfg.EMAIL_RECIPIENTS)
+
+
+def _run_fabricplatform(args):
+    from fabricplatform.agent import run_fabricplatform_newsletter_agent
+
+    if args.interactive:
+        _interactive_loop("FABRIC PLATFORM NEWSLETTER AGENT", run_fabricplatform_newsletter_agent)
+        return
+
+    if args.section:
+        prompt = SECTION_PROMPTS[args.section]
+        print(f"Running section: {args.section}\n")
+    elif args.prompt:
+        prompt = " ".join(args.prompt)
+        print(f"Custom prompt: {prompt}\n")
+    else:
+        prompt = None
+        print("Using default Fabric Platform newsletter prompt.\n")
+
+    result = run_fabricplatform_newsletter_agent(user_prompt=prompt)
+    _show_result("FABRIC PLATFORM NEWSLETTER AGENT RESULT", result)
+
+    suffix = f"_{args.section}" if args.section else ""
+    out_path = os.path.join(os.path.dirname(__file__), "output", f"fabricplatform_output{suffix}.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+    print(f"\nSaved to: {out_path}")
+
+    if args.send:
+        from fabricplatform import config as fp_cfg
+        from fabricplatform.tools import send_email
+
+        section_label = args.section or "Full Newsletter"
+        subject = f"{fp_cfg.EMAIL_SUBJECT_PREFIX} - {section_label}"
+        _send(send_email, subject, result, fp_cfg.EMAIL_RECIPIENTS)
+
+
 def _interactive_loop(banner: str, run_fn):
     print("=" * 60)
     print(f"{banner} - INTERACTIVE MODE")
@@ -186,16 +296,16 @@ def _send(send_fn, subject, html, recipients):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Newsletter or MoR agent locally.",
+        description="Run Newsletter, MoR, Sprint Summary, Power BI, or Fabric Platform agent locally.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Agents: newsletter (default), mor\n"
+            "Agents: newsletter (default), powerbi, fabricplatform, mor, sprint\n"
             "Newsletter sections: " + ", ".join(VALID_SECTIONS)
         ),
     )
     parser.add_argument(
         "--agent", "-a",
-        choices=["newsletter", "mor"],
+        choices=["newsletter", "powerbi", "fabricplatform", "mor", "sprint"],
         default="newsletter",
         help="Which agent to run (default: newsletter).",
     )
@@ -223,6 +333,12 @@ def main():
 
     if args.agent == "mor":
         _run_mor(args)
+    elif args.agent == "sprint":
+        _run_sprint(args)
+    elif args.agent == "powerbi":
+        _run_powerbi(args)
+    elif args.agent == "fabricplatform":
+        _run_fabricplatform(args)
     else:
         _run_newsletter(args)
 

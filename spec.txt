@@ -1,4 +1,4 @@
-- Create a compiling newsletter Agent, I mig
+- Create a compiling newsletter Agent, 
    - Sections 
 	- Hot topics for month
             - Get data from SharePoint file and summarize
@@ -16,4 +16,4 @@
 	        -  Get Taxonomy Changes from ADO, ADO query
 
        - Component V-Team
-           - It is a static data 
+           - It is a  data 
