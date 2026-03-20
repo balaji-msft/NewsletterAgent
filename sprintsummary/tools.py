@@ -10,7 +10,7 @@ import json
 import logging
 
 from shared import ado_client
-from shared.email import send_email as _send_email
+from shared.email_sender import send_email as _send_email
 from sprintsummary import config as cfg
 
 log = logging.getLogger("sprintsummary.tools")
@@ -25,10 +25,7 @@ def get_sprint_query_results() -> str:
     org_url = cfg.SPRINTSUMMARY_ORG_URL
     project = cfg.SPRINTSUMMARY_PROJECT
     query_id = cfg.SPRINTSUMMARY_QUERY_ID
-    pat = cfg.SPRINTSUMMARY_PAT
-
-    if not pat:
-        return json.dumps({"error": "SPRINTSUMMARY_PAT (or FABRICBIMOR_PAT / CSS_FEEDBACK_PAT) not set."})
+    pat = cfg.SPRINTSUMMARY_PAT or None  # None triggers Entra ID fallback
 
     log.info(
         "Fetching Sprint Summary query results  org=%s  project=%s  query=%s",
@@ -36,7 +33,7 @@ def get_sprint_query_results() -> str:
     )
 
     try:
-        items = ado_client.fetch_ado_query_results(org_url, project, pat, query_id)
+        items = ado_client.fetch_ado_query_results(org_url, project, pat=pat, query_id=query_id)
     except Exception as e:
         log.exception("Failed to fetch Sprint Summary query results")
         return json.dumps({"error": str(e)})

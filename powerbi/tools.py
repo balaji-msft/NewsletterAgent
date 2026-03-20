@@ -79,7 +79,7 @@ def get_wiki_commits(
     org = config.ADO_ORG
     project = config.ADO_PROJECT
     repo = config.TSG_REPO_NAME
-    pat = config.ADO_PAT
+    pat = config.ADO_PAT or None  # None triggers Entra ID fallback
 
     now = datetime.now(timezone.utc)
     if year and month:
@@ -150,16 +150,16 @@ def get_eeez_features(
     org = config.ADO_ORG
     project = config.ADO_PROJECT
     wiki = config.TSG_WIKI_NAME
-    pat = config.ADO_PAT
+    pat = config.ADO_PAT or None
 
     pages = ado_client.fetch_wiki_child_pages(
-        org, project, wiki, pat,
+        org, project, wiki, pat=pat,
         parent_path=parent_path, title_filter=title_filter,
     )
 
     for page in pages:
         content = ado_client.fetch_wiki_page_content(
-            org, project, wiki, pat, page["path"]
+            org, project, wiki, pat=pat, path=page["path"]
         )
         page["content"] = content[:2000] if len(content) > 2000 else content
 
@@ -185,13 +185,13 @@ def get_ado_query_results(
     project = project or config.ADO_PROJECT
 
     if org_url == config.CSS_TAXONOMY_ORG_URL:
-        pat = config.CSS_TAXONOMY_PAT or config.ADO_PAT
+        pat = config.CSS_TAXONOMY_PAT or config.ADO_PAT or None
     elif org_url == config.CSS_FEEDBACK_ORG_URL:
-        pat = config.CSS_FEEDBACK_PAT or config.ADO_PAT
+        pat = config.CSS_FEEDBACK_PAT or config.ADO_PAT or None
     else:
-        pat = config.ADO_PAT
+        pat = config.ADO_PAT or None
 
-    items = ado_client.fetch_ado_query_results(org_url, project, pat, query_id)
+    items = ado_client.fetch_ado_query_results(org_url, project, pat=pat, query_id=query_id)
 
     bracket_re = re.compile(r"^\[CSSFeedback\]\[([^\]]+)\]\[[^\]]+\]\s*[-:]?\s*(.*)$", re.IGNORECASE)
     for item in items:
@@ -228,7 +228,7 @@ def send_email(
     html_body: str,
     to_recipients: str | None = None,
 ) -> str:
-    from shared.email import send_email as _send
+    from shared.email_sender import send_email as _send
 
     to = to_recipients or config.EMAIL_RECIPIENTS
     return _send(

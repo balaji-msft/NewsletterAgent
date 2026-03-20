@@ -2,24 +2,45 @@
 Azure DevOps client — shared across all agents.
 Handles wiki-backed repos, code wiki path mapping, commit scanning,
 and work-item query execution.
+
+Authentication: Uses Entra ID (DefaultAzureCredential) by default.
+Falls back to PAT-based auth when a PAT is explicitly provided.
 """
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote, unquote
 
 import requests
+from azure.identity import DefaultAzureCredential
 
 log = logging.getLogger("shared.ado")
 
 _DASH_PLACEHOLDER = "\x00"
 
+# Azure DevOps resource ID for Entra ID tokens
+_ADO_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
+
+_credential = DefaultAzureCredential()
+_token_lock = threading.Lock()
+
 
 # ── helpers ───────────────────────────────────────────────────────────
 
-def _auth(pat: str):
-    return ("", pat)
+def _get_ado_headers() -> dict[str, str]:
+    """Get Authorization header using Entra ID bearer token."""
+    with _token_lock:
+        token = _credential.get_token(_ADO_RESOURCE)
+    return {"Authorization": f"Bearer {token.token}"}
+
+
+def _auth_kwargs(pat: str | None) -> dict:
+    """Return either auth= or headers= kwargs for requests, depending on auth mode."""
+    if pat:
+        return {"auth": ("", pat)}
+    return {"headers": _get_ado_headers()}
 
 
 def _check_auth(resp: requests.Response, context: str = "") -> None:
@@ -28,7 +49,7 @@ def _check_auth(resp: requests.Response, context: str = "") -> None:
     if resp.status_code in (401, 403) or looks_like_signin:
         raise PermissionError(
             f"ADO authentication failed ({context}). "
-            "Check your PAT has Code Read + Wiki Read scopes and has not expired."
+            "Check your Entra ID identity (or PAT) has the required scopes and has not expired."
         )
 
 
@@ -67,10 +88,10 @@ def _wiki_link(org: str, project: str, wiki: str, wiki_path: str) -> str:
 
 # ── public API ────────────────────────────────────────────────────────
 
-def fetch_wikis(org: str, project: str, pat: str) -> list[dict]:
+def fetch_wikis(org: str, project: str, pat: str | None = None) -> list[dict]:
     p = quote(project, safe="")
     url = f"https://dev.azure.com/{org}/{p}/_apis/wiki/wikis?api-version=7.1"
-    resp = requests.get(url, auth=_auth(pat), timeout=15)
+    resp = requests.get(url, **_auth_kwargs(pat), timeout=15)
     _check_auth(resp, "wiki list")
     if resp.status_code != 200:
         return []
@@ -85,8 +106,8 @@ def match_wiki_for_repo(wikis: list[dict], repo: str) -> tuple[str, str, str]:
 
 
 def fetch_wiki_page(
-    org: str, project: str, wiki: str, pat: str,
-    path: str, recursion: str = "oneLevel", include_content: bool = False,
+    org: str, project: str, wiki: str, pat: str | None = None,
+    path: str = "/", recursion: str = "oneLevel", include_content: bool = False,
 ) -> dict | None:
     p = quote(project, safe="")
     w = quote(wiki, safe="")
@@ -98,7 +119,7 @@ def fetch_wiki_page(
         f"&includeContent={'true' if include_content else 'false'}"
         f"&api-version=7.1"
     )
-    resp = requests.get(url, auth=_auth(pat), timeout=30)
+    resp = requests.get(url, **_auth_kwargs(pat), timeout=30)
     _check_auth(resp, f"wiki page {path}")
     if resp.status_code != 200:
         log.warning("Wiki page %s returned %d", path, resp.status_code)
@@ -107,8 +128,8 @@ def fetch_wiki_page(
 
 
 def fetch_wiki_child_pages(
-    org: str, project: str, wiki: str, pat: str,
-    parent_path: str, title_filter: str = "",
+    org: str, project: str, wiki: str, pat: str | None = None,
+    parent_path: str = "/", title_filter: str = "",
 ) -> list[dict]:
     page = fetch_wiki_page(org, project, wiki, pat, parent_path, recursion="oneLevel")
     if page is None:
@@ -131,7 +152,7 @@ def fetch_wiki_child_pages(
 
 
 def fetch_wiki_page_content(
-    org: str, project: str, wiki: str, pat: str, path: str,
+    org: str, project: str, wiki: str, pat: str | None = None, path: str = "/",
 ) -> str:
     page = fetch_wiki_page(org, project, wiki, pat, path, include_content=True)
     if page is None:
@@ -140,8 +161,8 @@ def fetch_wiki_page_content(
 
 
 def fetch_commits(
-    org: str, project: str, repo: str, pat: str,
-    start_date: str, end_date: str, item_path: str = "",
+    org: str, project: str, repo: str, pat: str | None = None,
+    start_date: str = "", end_date: str = "", item_path: str = "",
 ) -> list[dict]:
     p = quote(project, safe="")
     r = quote(repo, safe="")
@@ -155,11 +176,12 @@ def fetch_commits(
     if item_path:
         base_url += f"&searchCriteria.itemPath={quote(item_path, safe='/')}"
 
+    auth_kw = _auth_kwargs(pat)
     all_commits: list[dict] = []
     skip = 0
     while True:
         url = f"{base_url}&$skip={skip}" if skip else base_url
-        resp = requests.get(url, auth=_auth(pat), timeout=60)
+        resp = requests.get(url, **auth_kw, timeout=60)
         _check_auth(resp, "commits")
         if resp.status_code != 200:
             raise RuntimeError(f"ADO error {resp.status_code}: {resp.text[:300]}")
@@ -174,7 +196,7 @@ def fetch_commits(
 
 
 def fetch_commit_changes(
-    org: str, project: str, repo: str, pat: str, commit_id: str,
+    org: str, project: str, repo: str, pat: str | None = None, commit_id: str = "",
 ) -> list[dict]:
     p = quote(project, safe="")
     r = quote(repo, safe="")
@@ -182,15 +204,15 @@ def fetch_commit_changes(
         f"https://dev.azure.com/{org}/{p}/_apis/git/repositories/{r}"
         f"/commits/{commit_id}/changes?api-version=7.1-preview.1"
     )
-    resp = requests.get(url, auth=_auth(pat), timeout=30)
+    resp = requests.get(url, **_auth_kwargs(pat), timeout=30)
     if resp.status_code != 200:
         return []
     return resp.json().get("changes", [])
 
 
 def fetch_wiki_commits_for_folder(
-    org: str, project: str, repo: str, pat: str,
-    start_date: str, end_date: str,
+    org: str, project: str, repo: str, pat: str | None = None,
+    start_date: str = "", end_date: str = "",
     wiki_name: str = "", folder_filter: str = "",
 ) -> list[dict]:
     wikis = fetch_wikis(org, project, pat)
@@ -206,7 +228,8 @@ def fetch_wiki_commits_for_folder(
 
     git_folder_prefix = ""
     if folder_filter and mapped_path:
-        git_folder = folder_filter.replace(" ", "-")
+        ff = folder_filter if folder_filter.startswith("/") else f"/{folder_filter}"
+        git_folder = ff.replace(" ", "-")
         mp = mapped_path.rstrip("/")
         git_folder_prefix = f"{mp}{git_folder}".lower()
         log.info("Git folder prefix filter: %s", git_folder_prefix)
@@ -255,11 +278,12 @@ def fetch_wiki_commits_for_folder(
 
 
 def fetch_ado_query_results(
-    org_url: str, project: str, pat: str, query_id: str,
+    org_url: str, project: str, pat: str | None = None, query_id: str = "",
 ) -> list[dict]:
+    auth_kw = _auth_kwargs(pat)
     p = quote(project, safe="")
     url = f"{org_url}/{p}/_apis/wit/wiql/{query_id}?api-version=7.1"
-    resp = requests.get(url, auth=_auth(pat), timeout=60)
+    resp = requests.get(url, **auth_kw, timeout=60)
     _check_auth(resp, "work item query")
     if resp.status_code != 200:
         raise RuntimeError(f"Query failed HTTP {resp.status_code}: {resp.text[:300]}")
@@ -280,7 +304,7 @@ def fetch_ado_query_results(
             f"Microsoft.VSTS.Scheduling.CompletedWork"
             f"&api-version=7.1"
         )
-        r = requests.get(detail_url, auth=_auth(pat), timeout=60)
+        r = requests.get(detail_url, **auth_kw, timeout=60)
         _check_auth(r, "work item details")
         if r.status_code != 200:
             continue

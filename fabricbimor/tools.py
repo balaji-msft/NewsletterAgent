@@ -10,7 +10,7 @@ import json
 import logging
 
 from shared import ado_client
-from shared.email import send_email as _send_email
+from shared.email_sender import send_email as _send_email
 from fabricbimor import config as cfg
 
 log = logging.getLogger("fabricbimor.tools")
@@ -28,10 +28,7 @@ def get_mor_query_results() -> str:
     org_url = cfg.FABRICBIMOR_ORG_URL
     project = cfg.FABRICBIMOR_PROJECT
     query_id = cfg.FABRICBIMOR_QUERY_ID
-    pat = cfg.FABRICBIMOR_PAT
-
-    if not pat:
-        return json.dumps({"error": "FABRICBIMOR_PAT (or CSS_FEEDBACK_PAT) not set."})
+    pat = cfg.FABRICBIMOR_PAT or None  # None triggers Entra ID fallback
 
     log.info(
         "Fetching MoR query results  org=%s  project=%s  query=%s",
@@ -39,7 +36,7 @@ def get_mor_query_results() -> str:
     )
 
     try:
-        items = ado_client.fetch_ado_query_results(org_url, project, pat, query_id)
+        items = ado_client.fetch_ado_query_results(org_url, project, pat=pat, query_id=query_id)
     except Exception as e:
         log.exception("Failed to fetch MoR query results")
         return json.dumps({"error": str(e)})

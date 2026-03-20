@@ -7,6 +7,8 @@ __pycache__/
 
 # ── Secrets & credentials (NEVER commit) ────────────────────────────
 local.settings.json
+appsetting.prod.json
+appsettings*.json
 .env
 .env.*
 *.pfx
@@ -14,6 +16,8 @@ local.settings.json
 *.pem
 *.key
 .graph_token_cache.json
+_test_auth.py
+_test_e2e.py
 
 # ── Generated output ────────────────────────────────────────────────
 output/

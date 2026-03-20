@@ -7,9 +7,12 @@ Usage:
   python run_local.py --agent powerbi                # Power BI newsletter agent
   python run_local.py --agent fabricplatform         # Fabric Platform newsletter agent
   python run_local.py --agent mor                    # Fabric BI MoR callout agent
+  python run_local.py --agent dnai                    # Fabric BI MoR callout agent
   python run_local.py --agent sprint                 # Sprint Summary agent
   python run_local.py --section tsg                  # only the TSG section
+  python run_local.py --section tsg -p "Fabric Experiences/Data Engineering"  # TSG with folder path
   python run_local.py --section hot_topics           # only Hot Topics
+  python run_local.py --section eeez                 # only Fabric Made EEE-z
   python run_local.py --section eeez                 # only Fabric Made EEE-z
   python run_local.py --section css_feedback         # only CSS Feedback Items
   python run_local.py --section css_taxonomy         # only CSS Taxonomy Changes
@@ -257,6 +260,49 @@ def _run_fabricplatform(args):
         _send(send_email, subject, result, fp_cfg.EMAIL_RECIPIENTS)
 
 
+def _run_dnai(args):
+    from dnai.agent import run_dnai_newsletter_agent
+
+    if args.interactive:
+        _interactive_loop("DNAI NEWSLETTER AGENT", run_dnai_newsletter_agent)
+        return
+
+    if args.section:
+        prompt = SECTION_PROMPTS[args.section]
+        if args.section == "eeez" and args.filter:
+            prompt += f' Use title_filter="{args.filter}" when calling get_eeez_features.'
+            print(f"Running section: {args.section} (filter={args.filter})\n")
+        elif args.section == "tsg" and args.path:
+            prompt += f' Use folder_filter="{args.path}" when calling get_wiki_commits.'
+            print(f"Running section: {args.section} (path={args.path})\n")
+        else:
+            print(f"Running section: {args.section}\n")
+    elif args.prompt:
+        prompt = " ".join(args.prompt)
+        print(f"Custom prompt: {prompt}\n")
+    else:
+        prompt = None
+        print("Using default DnAI newsletter prompt.\n")
+
+    result = run_dnai_newsletter_agent(user_prompt=prompt)
+    _show_result("DNAI NEWSLETTER AGENT RESULT", result)
+
+    suffix = f"_{args.section}" if args.section else ""
+    out_path = os.path.join(os.path.dirname(__file__), "output", f"dnai_output{suffix}.html")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+    print(f"\nSaved to: {out_path}")
+
+    if args.send:
+        from dnai import config as dnai_cfg
+        from dnai.tools import send_email
+
+        section_label = args.section or "Full Newsletter"
+        subject = f"{dnai_cfg.EMAIL_SUBJECT_PREFIX} - {section_label}"
+        _send(send_email, subject, result, dnai_cfg.EMAIL_RECIPIENTS)
+
+
 def _interactive_loop(banner: str, run_fn):
     print("=" * 60)
     print(f"{banner} - INTERACTIVE MODE")
@@ -296,16 +342,16 @@ def _send(send_fn, subject, html, recipients):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Newsletter, MoR, Sprint Summary, Power BI, or Fabric Platform agent locally.",
+        description="Run Newsletter, MoR, Sprint Summary, Power BI, Fabric Platform, or DnAI agent locally.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Agents: newsletter (default), powerbi, fabricplatform, mor, sprint\n"
+            "Agents: newsletter (default), powerbi, fabricplatform, dnai, mor, sprint\n"
             "Newsletter sections: " + ", ".join(VALID_SECTIONS)
         ),
     )
     parser.add_argument(
         "--agent", "-a",
-        choices=["newsletter", "powerbi", "fabricplatform", "mor", "sprint"],
+        choices=["newsletter", "powerbi", "fabricplatform", "dnai", "mor", "sprint"],
         default="newsletter",
         help="Which agent to run (default: newsletter).",
     )
@@ -325,6 +371,14 @@ def main():
         help="Send the generated output via email after generation.",
     )
     parser.add_argument(
+        "--filter", "-f",
+        help="EEE-z title filter override (e.g. NF-PBI, NF-PLAT). Used with --section eeez.",
+    )
+    parser.add_argument(
+        "--path", "-p",
+        help='TSG wiki folder path override (e.g. "Fabric Experiences/Data Engineering"). Used with --section tsg.',
+    )
+    parser.add_argument(
         "prompt",
         nargs="*",
         help="Custom prompt text (ignored when --section or --interactive is used).",
@@ -339,6 +393,8 @@ def main():
         _run_powerbi(args)
     elif args.agent == "fabricplatform":
         _run_fabricplatform(args)
+    elif args.agent == "dnai":
+        _run_dnai(args)
     else:
         _run_newsletter(args)
 

@@ -1,8 +1,8 @@
 """
-Tool implementations for the Fabric Platform Newsletter Agent.
+Tool implementations for the DnAI Newsletter Agent.
 
-Identical behaviour to the newsletter agent tools, but reads config
-from the fabricplatform package so product-specific overrides take effect.
+Identical behaviour to the Power BI newsletter agent tools, but reads config
+from the dnai package so product-specific overrides take effect.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import re
 import requests
 from datetime import datetime, timedelta, timezone
 
-from fabricplatform import config
+from dnai import config
 from shared import ado_client
 
 
@@ -126,7 +126,8 @@ def get_wiki_commits(
             seen[link] = entry
 
     for v in seen.values():
-        v.pop("_cat", None)
+        cat = v.pop("_cat", "EDIT")
+        v["status"] = "New" if cat == "NEW" else "Updated"
     slim_rows = sorted(seen.values(), key=lambda r: (r["component"], r["page"]))
     slim_rows = slim_rows[:50]
     return json.dumps(slim_rows, indent=2)
@@ -184,6 +185,7 @@ def get_ado_query_results(
     org_url = org_url or config.ADO_ORG_URL
     project = project or config.ADO_PROJECT
 
+    # Pick the right PAT for the org; empty string → None → Entra ID fallback
     if org_url == config.CSS_TAXONOMY_ORG_URL:
         pat = config.CSS_TAXONOMY_PAT or config.ADO_PAT or None
     elif org_url == config.CSS_FEEDBACK_ORG_URL:

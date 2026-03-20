@@ -1,0 +1,6 @@
+python run_local.py --agent dnai --send                        # full newsletter + email
+python run_local.py --agent dnai --section eeez --send         # single section + email
+python run_local.py --agent dnai --section eeez -f NF-DE --send  # with filter + email
+python run_local.py --agent dnai --section tsg -p "Fabric Experiences/Data Engineering" --send
+python run_local.py --agent dnai --section eeez -f NF-DE --send  
+python run_local.py --agent dnai --section tsg -p "Fabric Experiences/Data Engineering" --send
